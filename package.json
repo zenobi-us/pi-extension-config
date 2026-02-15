@@ -1,10 +1,10 @@
 {
-  "name": "my-bun-module",
+  "name": "pi-extension-config",
   "version": "0.1.0",
-  "description": "A Bun module",
+  "description": "Configuration helpers for Pi extensions",
   "author": {
-    "name": "Your Name",
-    "email": "you@example.com"
+    "name": "Zeno Jiricek",
+    "email": "airtonix@users.noreply.github.com"
   },
   "type": "module",
   "exports": {

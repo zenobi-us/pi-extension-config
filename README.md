@@ -1,6 +1,6 @@
-# my-bun-module
+# pi-extension-config
 
-A Bun module
+Configuration helpers for Pi extensions
 
 > A Bun module created from the [bun-module](https://github.com/zenobi-us/bun-module) template
 
