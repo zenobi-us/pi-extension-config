@@ -1,1 +1,1 @@
-export {};
+export { createConfigService } from './config';
