@@ -2,6 +2,7 @@ import nconf from 'nconf';
 import { homedir } from 'os';
 import path from 'path';
 
+// eslint-disable-next-line no-unused-vars
 export type ConfigParseFn<TConfig> = (config: unknown) => TConfig | Promise<TConfig>;
 
 export interface CreateConfigServiceOptions<TConfig> {
