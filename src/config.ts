@@ -1,47 +1,72 @@
 import nconf from 'nconf';
 import { homedir } from 'os';
 import path from 'path';
-import { StandardSchemaV1 } from '@standard-schema/spec';
 
-async function discoverGitRoot() {
-  return await Bun.$`git rev-parse --show-toplevel`.text();
+export type ConfigParseFn<TConfig> = (config: unknown) => TConfig | Promise<TConfig>;
+
+export interface CreateConfigServiceOptions<TConfig> {
+  defaults?: Partial<TConfig>;
+  parse?: ConfigParseFn<TConfig>;
 }
 
-export async function createConfigService<Schema extends StandardSchemaV1>(
+async function discoverGitRoot(): Promise<string | null> {
+  try {
+    const root = await Bun.$`git rev-parse --show-toplevel`.text();
+    const trimmedRoot = root.trim();
+    if (trimmedRoot.length === 0) {
+      return null;
+    }
+
+    return trimmedRoot;
+  } catch {
+    return null;
+  }
+}
+
+export async function createConfigService<TConfig = Record<string, unknown>>(
   name: string,
-  schema: Schema,
-  options?: { defaults?: StandardSchemaV1.InferOutput<Schema> }
-) {
-  const appname = 'pi-footer';
+  options?: CreateConfigServiceOptions<TConfig>
+): Promise<TConfig> {
+  const appname = name;
   const envprefix = appname.toUpperCase().replace(/-/g, '_') + '_';
 
+  const provider = new nconf.Provider();
+
   // Env
-  nconf.env({
+  provider.env({
     separator: '__',
     match: new RegExp(`^${envprefix}`),
   });
 
-  // Files
-  // The main config file is stored in the user's home directory under .pi/agent/pi-footer.json
-  nconf.file({
-    file: path.join(homedir(), '.pi', 'agent', `${appname}.config.json`),
-  });
-
   const root = await discoverGitRoot();
-  // The local config file is stored in the current working directory under .pi/pi-footer.json
-  nconf.file({
+
+  // Files
+  // The local config file is stored in the git root directory under .pi/<app>.config.json
+  provider.file('project', {
     file: path.join(root || process.cwd(), '.pi', `${appname}.config.json`),
   });
 
-  // Defaults
-  nconf.defaults(options?.defaults || {});
+  // The main config file is stored in the user's home directory under .pi/agent/<app>.config.json
+  provider.file('home', {
+    file: path.join(homedir(), '.pi', 'agent', `${appname}.config.json`),
+  });
 
   /*
    * Reload values from env + config file and return the normalized config snapshot.
    */
-  nconf.load();
+  provider.load();
 
-  const config = schema['~standard'].validate(nconf.get());
+  const loadedConfig: unknown = provider.get();
+  const rawConfig: unknown =
+    loadedConfig !== null && typeof loadedConfig === 'object'
+      ? {
+          ...(options?.defaults || {}),
+          ...(loadedConfig as Record<string, unknown>),
+        }
+      : { ...(options?.defaults || {}) };
+  if (!options?.parse) {
+    return rawConfig as TConfig;
+  }
 
-  return config;
+  return await options.parse(rawConfig);
 }
