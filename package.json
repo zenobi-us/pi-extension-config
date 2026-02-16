@@ -1,5 +1,5 @@
 {
-  "name": "pi-extension-config",
+  "name": "@zenobius/pi-extension-config",
   "version": "0.0.1",
   "description": "Configuration helpers for Pi extensions",
   "author": {
@@ -15,7 +15,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/airtonix/pi-extension-config.git"
+    "url": "https://github.com/zenobi-us/pi-extension-config.git"
   },
   "publishConfig": {
     "access": "public"
