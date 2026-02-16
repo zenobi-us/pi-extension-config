@@ -1,31 +1,10 @@
-import { Type, type Static, type TSchema } from '@sinclair/typebox';
-import { Value } from '@sinclair/typebox/value';
-import { type as arkType } from 'arktype';
+import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import nconf from 'nconf';
 import { homedir } from 'os';
 import path from 'path';
-import { createRequire } from 'node:module';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createConfigService } from './config.ts';
-
-const require = createRequire(import.meta.url);
-type NewType = {
-  // eslint-disable-next-line no-unused-vars
-  create: (provider: unknown, options?: Record<string, unknown>) => MountedVfs;
-  MemoryProvider: new () => unknown;
-};
-
-const vfs = require('node-vfs-polyfill') as NewType;
-
-type MountedVfs = {
-  // eslint-disable-next-line no-unused-vars
-  mkdirSync: (filePath: string, options?: { recursive?: boolean }) => void;
-  // eslint-disable-next-line no-unused-vars
-  writeFileSync: (filePath: string, contents: string) => void;
-  // eslint-disable-next-line no-unused-vars
-  mount: (mountPoint: string) => void;
-  unmount: () => void;
-};
 
 type MatrixCase = {
   name: string;
@@ -39,6 +18,11 @@ type MatrixConfig = {
   homeOnly?: string;
   projectOnly?: string;
   shared?: string;
+};
+
+type ValidatedConfig = {
+  retryCount: number;
+  logLevel: 'debug' | 'info';
 };
 
 const DEFAULTS: MatrixConfig = {
@@ -107,22 +91,77 @@ const MATRIX_CASES: MatrixCase[] = [
   },
 ];
 
-const FAKE_HOME = homedir();
-const FAKE_GIT_ROOT = '/virtual/repo';
+const HOME_ROOT = homedir();
+const PROJECT_ROOT = process.cwd();
 
-function mountJsonFile(
-  mountPoint: string,
-  filePath: string,
-  config: Record<string, unknown>
-): MountedVfs {
-  const filesystem = vfs.create(new vfs.MemoryProvider(), { overlay: true });
-  const directory = path.posix.dirname(filePath);
+function ensureObject(input: unknown): Record<string, unknown> {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('Invalid config: expected an object.');
+  }
 
-  filesystem.mkdirSync(directory, { recursive: true });
-  filesystem.writeFileSync(filePath, JSON.stringify(config));
-  filesystem.mount(mountPoint);
+  return input as Record<string, unknown>;
+}
 
-  return filesystem;
+function readOptionalString(
+  source: Record<string, unknown>,
+  key: keyof MatrixConfig
+): string | undefined {
+  const value = source[key];
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== 'string') {
+    throw new Error(`Invalid config: "${key}" must be a string.`);
+  }
+
+  return value;
+}
+
+function parseMatrixConfig(input: unknown): MatrixConfig {
+  const source = ensureObject(input);
+  const parsed: MatrixConfig = {};
+
+  const defaultOnly = readOptionalString(source, 'defaultOnly');
+  if (defaultOnly !== undefined) {
+    parsed.defaultOnly = defaultOnly;
+  }
+
+  const homeOnly = readOptionalString(source, 'homeOnly');
+  if (homeOnly !== undefined) {
+    parsed.homeOnly = homeOnly;
+  }
+
+  const projectOnly = readOptionalString(source, 'projectOnly');
+  if (projectOnly !== undefined) {
+    parsed.projectOnly = projectOnly;
+  }
+
+  const shared = readOptionalString(source, 'shared');
+  if (shared !== undefined) {
+    parsed.shared = shared;
+  }
+
+  return parsed;
+}
+
+function parseValidatedConfig(input: unknown): ValidatedConfig {
+  const source = ensureObject(input);
+
+  const retryCount = source.retryCount;
+  if (typeof retryCount !== 'number') {
+    throw new Error('Invalid config: "retryCount" must be a number.');
+  }
+
+  const logLevel = source.logLevel;
+  if (logLevel !== 'debug' && logLevel !== 'info') {
+    throw new Error('Invalid config: "logLevel" must be "debug" or "info".');
+  }
+
+  return {
+    retryCount,
+    logLevel,
+  };
 }
 
 function createExpectedConfig(testCase: MatrixCase): MatrixConfig {
@@ -143,195 +182,169 @@ function createExpectedConfig(testCase: MatrixCase): MatrixConfig {
   return expectedConfig;
 }
 
-function buildArkTypeParser() {
-  const schema = arkType({
-    defaultOnly: 'string?',
-    homeOnly: 'string?',
-    projectOnly: 'string?',
-    shared: 'string?',
-  });
-
-  return (input: unknown): MatrixConfig => {
-    const result = schema(input);
-    if (result instanceof arkType.errors) {
-      const details = result
-        .map((error) => `- ${error.path.join('.')}: ${error.message}`)
-        .join('\n');
-      throw new Error(`ArkType validation failed:\n${details}`);
-    }
-
-    return result;
-  };
-}
-
-function buildTypeBoxParser() {
-  const schema = Type.Object({
-    defaultOnly: Type.Optional(Type.String()),
-    homeOnly: Type.Optional(Type.String()),
-    projectOnly: Type.Optional(Type.String()),
-    shared: Type.Optional(Type.String()),
-  });
-
-  return createTypeBoxParser(schema);
-}
-
-function createTypeBoxParser<TSchemaType extends TSchema>(schema: TSchemaType) {
-  return (input: unknown): Static<TSchemaType> => {
-    const withSchemaDefaults = Value.Default(schema, input);
-    if (Value.Check(schema, withSchemaDefaults)) {
-      return withSchemaDefaults as Static<TSchemaType>;
-    }
-
-    const details = [...Value.Errors(schema, withSchemaDefaults)]
-      .map((error) => {
-        const normalizedPath = error.path.replace(/^\//, '').replace(/\//g, '.');
-        const printablePath = normalizedPath.length > 0 ? normalizedPath : '<root>';
-        return `- ${printablePath}: ${error.message}`;
-      })
-      .join('\n');
-
-    throw new Error(`TypeBox validation failed:\n${details}`);
-  };
+function writeJsonFile(filePath: string, config: Record<string, unknown>): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(config));
 }
 
 describe('createConfigService', () => {
-  const activeFileSystems: MountedVfs[] = [];
+  const createdFilePaths: string[] = [];
 
   beforeEach(() => {
     nconf.reset();
-
-    (globalThis as Record<string, unknown>).Bun = {
-      $: () => ({
-        text: async () => `${FAKE_GIT_ROOT}\n`,
-      }),
-    };
   });
 
   afterEach(() => {
-    while (activeFileSystems.length > 0) {
-      const filesystem = activeFileSystems.pop();
-      filesystem?.unmount();
+    while (createdFilePaths.length > 0) {
+      const filePath = createdFilePaths.pop();
+      if (!filePath) {
+        continue;
+      }
+
+      if (!fs.existsSync(filePath)) {
+        continue;
+      }
+
+      fs.rmSync(filePath, { force: true });
     }
 
     nconf.reset();
-    delete (globalThis as Record<string, unknown>).Bun;
   });
 
-  describe.each([
-    ['arktype', buildArkTypeParser],
-    ['typebox', buildTypeBoxParser],
-  ])('%s parser support', (engineName, createParser) => {
-    it.each(MATRIX_CASES)('loads config matrix case: $name', async (testCase) => {
-      const appName = `matrix-${engineName}`;
+  it.each(MATRIX_CASES)('loads config matrix case: $name', async (testCase) => {
+    const appName = `matrix-${randomUUID()}`;
 
-      if (testCase.hasHomeFile) {
-        activeFileSystems.push(
-          mountJsonFile(FAKE_HOME, `/.pi/agent/${appName}.config.json`, HOME_FILE)
-        );
-      }
+    if (testCase.hasHomeFile) {
+      const homeFilePath = path.join(HOME_ROOT, '.pi', 'agent', `${appName}.config.json`);
+      writeJsonFile(homeFilePath, HOME_FILE);
+      createdFilePaths.push(homeFilePath);
+    }
 
-      if (testCase.hasProjectFile) {
-        activeFileSystems.push(
-          mountJsonFile(FAKE_GIT_ROOT, `/.pi/${appName}.config.json`, PROJECT_FILE)
-        );
-      }
+    if (testCase.hasProjectFile) {
+      const projectFilePath = path.join(PROJECT_ROOT, '.pi', `${appName}.config.json`);
+      writeJsonFile(projectFilePath, PROJECT_FILE);
+      createdFilePaths.push(projectFilePath);
+    }
 
-      const loadedConfig = await createConfigService<MatrixConfig>(appName, {
-        defaults: testCase.hasDefaults ? DEFAULTS : undefined,
-        parse: createParser(),
-      });
-
-      const expectedConfig = createExpectedConfig(testCase);
-      expect(loadedConfig).toMatchObject(expectedConfig);
-
-      if (!testCase.hasDefaults) {
-        expect(loadedConfig.defaultOnly).toBeUndefined();
-      }
-      if (!testCase.hasHomeFile) {
-        expect(loadedConfig.homeOnly).toBeUndefined();
-      }
-      if (!testCase.hasProjectFile) {
-        expect(loadedConfig.projectOnly).toBeUndefined();
-      }
+    const service = await createConfigService<MatrixConfig>(appName, {
+      defaults: testCase.hasDefaults ? DEFAULTS : undefined,
+      parse: parseMatrixConfig,
     });
+
+    expect(service.config).toEqual(createExpectedConfig(testCase));
   });
 
   it('supports generic-only typing without a parse function', async () => {
     type TypedConfig = { featureEnabled: boolean };
 
-    const config = await createConfigService<TypedConfig>('typed-only', {
+    const service = await createConfigService<TypedConfig>(`typed-only-${randomUUID()}`, {
       defaults: { featureEnabled: true },
     });
 
-    const featureEnabled: boolean = config.featureEnabled;
+    const featureEnabled: boolean = service.config.featureEnabled;
     expect(featureEnabled).toBe(true);
   });
 
-  it('pretty prints TypeBox schema errors', async () => {
-    const appName = 'typebox-errors';
-    activeFileSystems.push(
-      mountJsonFile(FAKE_GIT_ROOT, `/.pi/${appName}.config.json`, {
-        retryCount: 'three',
-        logLevel: 42,
-      })
-    );
+  it('supports async parser/validator functions', async () => {
+    const appName = `async-parse-${randomUUID()}`;
+    const projectFilePath = path.join(PROJECT_ROOT, '.pi', `${appName}.config.json`);
 
-    const parse = createTypeBoxParser(
-      Type.Object({
-        retryCount: Type.Number(),
-        logLevel: Type.Union([Type.Literal('debug'), Type.Literal('info')]),
-      })
-    );
+    writeJsonFile(projectFilePath, {
+      retryCount: 3,
+      logLevel: 'info',
+    });
+    createdFilePaths.push(projectFilePath);
 
-    await expect(
-      createConfigService(appName, {
-        parse,
-      })
-    ).rejects.toThrowError(
-      [
-        'TypeBox validation failed:',
-        '- retryCount: Expected number',
-        '- logLevel: Expected union value',
-      ].join('\n')
-    );
-  });
-
-  it('pretty prints ArkType schema errors', async () => {
-    const appName = 'ark-errors';
-    activeFileSystems.push(
-      mountJsonFile(FAKE_GIT_ROOT, `/.pi/${appName}.config.json`, {
-        retryCount: 'three',
-        logLevel: 42,
-      })
-    );
-
-    const schema = arkType({
-      retryCount: 'number',
-      logLevel: '"debug" | "info"',
+    const service = await createConfigService(appName, {
+      parse: async (input: unknown) => parseValidatedConfig(input),
     });
 
-    const parse = (input: unknown) => {
-      const result = schema(input);
-      if (result instanceof arkType.errors) {
-        const details = result
-          .map((error) => `- ${error.path.join('.')}: ${error.message}`)
-          .join('\n');
-        throw new Error(`ArkType validation failed:\n${details}`);
-      }
+    expect(service.config).toEqual({ retryCount: 3, logLevel: 'info' });
+  });
 
-      return result;
-    };
+  it('surfaces parser/validator errors', async () => {
+    const appName = `validator-errors-${randomUUID()}`;
+    const projectFilePath = path.join(PROJECT_ROOT, '.pi', `${appName}.config.json`);
+
+    writeJsonFile(projectFilePath, {
+      retryCount: 'three',
+      logLevel: 42,
+    });
+    createdFilePaths.push(projectFilePath);
 
     await expect(
       createConfigService(appName, {
-        parse,
+        parse: parseValidatedConfig,
       })
-    ).rejects.toThrowError(
-      [
-        'ArkType validation failed:',
-        '- retryCount: retryCount must be a number (was a string)',
-        '- logLevel: logLevel must be "debug" or "info" (was a number)',
-      ].join('\n')
-    );
+    ).rejects.toThrowError('Invalid config: "retryCount" must be a number.');
+  });
+
+  it('reloads config from disk', async () => {
+    const appName = `reload-${randomUUID()}`;
+    const projectFilePath = path.join(PROJECT_ROOT, '.pi', `${appName}.config.json`);
+
+    writeJsonFile(projectFilePath, {
+      shared: 'before',
+    });
+    createdFilePaths.push(projectFilePath);
+
+    const service = await createConfigService<MatrixConfig>(appName, {
+      defaults: DEFAULTS,
+      parse: parseMatrixConfig,
+    });
+
+    expect(service.config.shared).toBe('before');
+
+    writeJsonFile(projectFilePath, {
+      shared: 'after',
+    });
+
+    await service.reload();
+
+    expect(service.config.shared).toBe('after');
+  });
+
+  it('set + save(project) persists updates', async () => {
+    const appName = `save-project-${randomUUID()}`;
+
+    const service = await createConfigService<MatrixConfig>(appName, {
+      defaults: DEFAULTS,
+      parse: parseMatrixConfig,
+    });
+
+    const projectFilePath = path.join(PROJECT_ROOT, '.pi', `${appName}.config.json`);
+    createdFilePaths.push(projectFilePath);
+
+    await service.set('shared', 'saved-project', 'project');
+    await service.save('project');
+
+    const reloadedService = await createConfigService<MatrixConfig>(appName, {
+      defaults: DEFAULTS,
+      parse: parseMatrixConfig,
+    });
+
+    expect(reloadedService.config.shared).toBe('saved-project');
+  });
+
+  it('set + save(home) persists updates', async () => {
+    const appName = `save-home-${randomUUID()}`;
+
+    const service = await createConfigService<MatrixConfig>(appName, {
+      defaults: DEFAULTS,
+      parse: parseMatrixConfig,
+    });
+
+    const homeFilePath = path.join(HOME_ROOT, '.pi', 'agent', `${appName}.config.json`);
+    createdFilePaths.push(homeFilePath);
+
+    await service.set('shared', 'saved-home', 'home');
+    await service.save('home');
+
+    const reloadedService = await createConfigService<MatrixConfig>(appName, {
+      defaults: DEFAULTS,
+      parse: parseMatrixConfig,
+    });
+
+    expect(reloadedService.config.shared).toBe('saved-home');
   });
 });

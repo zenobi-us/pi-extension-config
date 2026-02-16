@@ -10,6 +10,25 @@ export interface CreateConfigServiceOptions<TConfig> {
   parse?: ConfigParseFn<TConfig>;
 }
 
+/* eslint-disable no-unused-vars */
+export interface ConfigService<TConfig> {
+  readonly config: TConfig;
+  set(key: string, value: unknown, target?: 'home' | 'project'): Promise<void>;
+  reload(): Promise<void>;
+  save(target?: 'home' | 'project'): Promise<void>;
+}
+
+type NconfStore = {
+  set?(key: string, value: unknown): unknown;
+  saveSync?(): unknown;
+  save?(value: unknown, callback: (error?: Error | null) => void): void;
+};
+/* eslint-enable no-unused-vars */
+
+type NconfProviderWithStores = nconf.Provider & {
+  stores?: Record<string, NconfStore>;
+};
+
 async function discoverGitRoot(): Promise<string | null> {
   try {
     const root = await Bun.$`git rev-parse --show-toplevel`.text();
@@ -27,7 +46,7 @@ async function discoverGitRoot(): Promise<string | null> {
 export async function createConfigService<TConfig = Record<string, unknown>>(
   name: string,
   options?: CreateConfigServiceOptions<TConfig>
-): Promise<TConfig> {
+): Promise<ConfigService<TConfig>> {
   const appname = name;
   const envprefix = appname.toUpperCase().replace(/-/g, '_') + '_';
 
@@ -52,22 +71,82 @@ export async function createConfigService<TConfig = Record<string, unknown>>(
     file: path.join(homedir(), '.pi', 'agent', `${appname}.config.json`),
   });
 
-  /*
-   * Reload values from env + config file and return the normalized config snapshot.
-   */
   provider.load();
 
-  const loadedConfig: unknown = provider.get();
-  const rawConfig: unknown =
-    loadedConfig !== null && typeof loadedConfig === 'object'
-      ? {
-          ...(options?.defaults || {}),
-          ...(loadedConfig as Record<string, unknown>),
-        }
-      : { ...(options?.defaults || {}) };
-  if (!options?.parse) {
-    return rawConfig as TConfig;
+  const getConfig = async (): Promise<TConfig> => {
+    const loadedConfig: unknown = provider.get();
+    const rawConfig: unknown =
+      loadedConfig !== null && typeof loadedConfig === 'object'
+        ? {
+            ...(options?.defaults || {}),
+            ...(loadedConfig as Record<string, unknown>),
+          }
+        : { ...(options?.defaults || {}) };
+
+    if (!options?.parse) {
+      return rawConfig as TConfig;
+    }
+
+    return await options.parse(rawConfig);
+  };
+
+  let config = await getConfig();
+
+  async function set(
+    key: string,
+    value: unknown,
+    target: 'home' | 'project' = 'project'
+  ): Promise<void> {
+    const store = (provider as NconfProviderWithStores).stores?.[target];
+    if (!store || typeof store.set !== 'function') {
+      throw new Error(`Config target '${target}' does not support setting keys.`);
+    }
+
+    store.set(key, value);
+    config = await getConfig();
   }
 
-  return await options.parse(rawConfig);
+  async function reload(): Promise<void> {
+    provider.load();
+    config = await getConfig();
+  }
+
+  async function save(target: 'home' | 'project' = 'home'): Promise<void> {
+    const store = (provider as NconfProviderWithStores).stores?.[target];
+    if (!store) {
+      throw new Error(`Unknown config target: ${target}`);
+    }
+
+    if (typeof store.saveSync === 'function') {
+      store.saveSync();
+      await reload();
+      return;
+    }
+
+    if (typeof store.save === 'function') {
+      await new Promise<void>((resolve, reject) => {
+        store.save?.(undefined, (error?: Error | null) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+
+          resolve();
+        });
+      });
+      await reload();
+      return;
+    }
+
+    throw new Error(`Config target '${target}' does not support saving.`);
+  }
+
+  return {
+    get config() {
+      return config;
+    },
+    set,
+    reload,
+    save,
+  };
 }
