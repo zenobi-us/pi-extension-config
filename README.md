@@ -19,7 +19,7 @@ Type-safe, layered configuration for Pi extensions.
 4. **Defaults** — passed when creating the service
 
 ```typescript
-import { createConfigService } from 'pi-extension-config';
+import { createConfigService } from '@zenobius/pi-extension-config';
 
 
 export default function MyExtension(pi: ExtensionApi) {
@@ -45,16 +45,16 @@ export default function MyExtension(pi: ExtensionApi) {
 
 ```bash
 # bun
-bun add pi-extension-config
+bun add @zenobius/pi-extension-config
 
 # npm
-npm install pi-extension-config
+npm install @zenobius/pi-extension-config
 
 # pnpm
-pnpm add pi-extension-config
+pnpm add @zenobius/pi-extension-config
 
 # yarn
-yarn add pi-extension-config
+yarn add @zenobius/pi-extension-config
 ```
 
 ## API
