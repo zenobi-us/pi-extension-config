@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.0](https://github.com/zenobi-us/pi-extension-config/compare/v0.0.2...v0.1.0) (2026-02-18)
+
+
+### Features
+
+* **research:** complete research phase for event handler file watcher ([0a8ce68](https://github.com/zenobi-us/pi-extension-config/commit/0a8ce6818054ce13d7e541e6bb5cf359e4ba3d53))
+
 ## 0.0.2 (2026-02-16)
 
 
