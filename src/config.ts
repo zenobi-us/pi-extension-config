@@ -1,6 +1,7 @@
 import nconf from 'nconf';
 import { homedir } from 'os';
 import path from 'path';
+import { runMigrations, type Migration } from './migrations.ts';
 
 // eslint-disable-next-line no-unused-vars
 export type ConfigParseFn<TConfig> = (config: unknown) => TConfig | Promise<TConfig>;
@@ -8,6 +9,9 @@ export type ConfigParseFn<TConfig> = (config: unknown) => TConfig | Promise<TCon
 export interface CreateConfigServiceOptions<TConfig> {
   defaults?: Partial<TConfig>;
   parse?: ConfigParseFn<TConfig>;
+  migrations?: Migration[];
+  versionKey?: string;
+  exposeVersion?: boolean;
 }
 
 /* eslint-disable no-unused-vars */
@@ -29,6 +33,56 @@ type NconfProviderWithStores = nconf.Provider & {
   stores?: Record<string, NconfStore>;
 };
 
+type LoadedConfigState<TConfig> = {
+  config: TConfig;
+  persistedConfig: Record<string, unknown>;
+};
+
+const DEFAULT_VERSION_KEY = '__configVersion';
+
+function toRecord(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  return { ...(value as Record<string, unknown>) };
+}
+
+function cloneValue<TValue>(value: TValue): TValue {
+  if (typeof globalThis.structuredClone === 'function') {
+    try {
+      return globalThis.structuredClone(value);
+    } catch {
+      return value;
+    }
+  }
+
+  return value;
+}
+
+function maybeHideVersion<TConfig>(
+  config: TConfig,
+  versionKey: string,
+  exposeVersion: boolean
+): TConfig {
+  if (exposeVersion) {
+    return config;
+  }
+
+  if (config === null || typeof config !== 'object' || Array.isArray(config)) {
+    return config;
+  }
+
+  const configObject = config as Record<string, unknown>;
+  if (!(versionKey in configObject)) {
+    return config;
+  }
+
+  const withoutVersion = { ...configObject };
+  delete withoutVersion[versionKey];
+  return withoutVersion as TConfig;
+}
+
 async function discoverGitRoot(): Promise<string | null> {
   try {
     const root = await Bun.$`git rev-parse --show-toplevel`.text();
@@ -49,6 +103,8 @@ export async function createConfigService<TConfig = Record<string, unknown>>(
 ): Promise<ConfigService<TConfig>> {
   const appname = name;
   const envprefix = appname.toUpperCase().replace(/-/g, '_') + '_';
+  const versionKey = options?.versionKey ?? DEFAULT_VERSION_KEY;
+  const exposeVersion = options?.exposeVersion ?? false;
 
   const provider = new nconf.Provider();
 
@@ -73,24 +129,59 @@ export async function createConfigService<TConfig = Record<string, unknown>>(
 
   provider.load();
 
-  const getConfig = async (): Promise<TConfig> => {
-    const loadedConfig: unknown = provider.get();
-    const rawConfig: unknown =
-      loadedConfig !== null && typeof loadedConfig === 'object'
-        ? {
-            ...(options?.defaults || {}),
-            ...(loadedConfig as Record<string, unknown>),
-          }
-        : { ...(options?.defaults || {}) };
+  const loadConfig = async (): Promise<LoadedConfigState<TConfig>> => {
+    const rawConfig = toRecord(provider.get());
+    const migrations = options?.migrations ?? [];
 
-    if (!options?.parse) {
-      return rawConfig as TConfig;
+    let persistedConfig = { ...rawConfig };
+
+    if (migrations.length > 0) {
+      const migrationInput = { ...rawConfig };
+      const currentVersionValue = migrationInput[versionKey];
+      const currentVersion = currentVersionValue === undefined ? 0 : Number(currentVersionValue);
+      delete migrationInput[versionKey];
+
+      const migrationResult = await runMigrations({
+        config: migrationInput,
+        currentVersion,
+        migrations,
+      });
+
+      if (migrationResult.status === 'failed') {
+        if (migrationResult.failure) {
+          throw new Error(
+            `Migration failed at ${migrationResult.failure.migrationId} (${migrationResult.failure.fromVersion} -> ${migrationResult.failure.toVersion}): ${migrationResult.failure.message}`
+          );
+        }
+
+        throw new Error('Migration failed');
+      }
+
+      const migratedConfig = toRecord(migrationResult.config);
+      persistedConfig = {
+        ...migratedConfig,
+        [versionKey]: migrationResult.finalVersion,
+      };
     }
 
-    return await options.parse(rawConfig);
+    const mergedForParse: unknown = {
+      ...toRecord(options?.defaults),
+      ...persistedConfig,
+    };
+
+    const parsedConfig = options?.parse
+      ? await options.parse(mergedForParse)
+      : (mergedForParse as TConfig);
+
+    return {
+      config: maybeHideVersion(parsedConfig, versionKey, exposeVersion),
+      persistedConfig,
+    };
   };
 
-  let config = await getConfig();
+  let loadedConfig = await loadConfig();
+  let config = cloneValue(loadedConfig.config);
+  let persistedConfig = { ...loadedConfig.persistedConfig };
 
   async function set(
     key: string,
@@ -103,18 +194,28 @@ export async function createConfigService<TConfig = Record<string, unknown>>(
     }
 
     store.set(key, value);
-    config = await getConfig();
+    loadedConfig = await loadConfig();
+    config = cloneValue(loadedConfig.config);
+    persistedConfig = { ...loadedConfig.persistedConfig };
   }
 
   async function reload(): Promise<void> {
     provider.load();
-    config = await getConfig();
+    loadedConfig = await loadConfig();
+    config = cloneValue(loadedConfig.config);
+    persistedConfig = { ...loadedConfig.persistedConfig };
   }
 
   async function save(target: 'home' | 'project' = 'home'): Promise<void> {
     const store = (provider as NconfProviderWithStores).stores?.[target];
     if (!store) {
       throw new Error(`Unknown config target: ${target}`);
+    }
+
+    if (typeof store.set === 'function') {
+      for (const [key, value] of Object.entries(persistedConfig)) {
+        store.set(key, value);
+      }
     }
 
     if (typeof store.saveSync === 'function') {
@@ -143,7 +244,7 @@ export async function createConfigService<TConfig = Record<string, unknown>>(
 
   return {
     get config() {
-      return config;
+      return cloneValue(config);
     },
     set,
     reload,
