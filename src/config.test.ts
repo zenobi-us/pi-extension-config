@@ -5,6 +5,7 @@ import { homedir } from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createConfigService } from './config.ts';
+import type { Migration } from './migrations.ts';
 
 type MatrixCase = {
   name: string;
@@ -346,5 +347,188 @@ describe('createConfigService', () => {
     });
 
     expect(reloadedService.config.shared).toBe('saved-home');
+  });
+
+  it('runs migrations from baseline version 0 in array index order', async () => {
+    const appName = `migrate-order-${randomUUID()}`;
+    const projectFilePath = path.join(PROJECT_ROOT, '.pi', `${appName}.config.json`);
+    const callOrder: string[] = [];
+
+    writeJsonFile(projectFilePath, {
+      feature: 'legacy',
+    });
+    createdFilePaths.push(projectFilePath);
+
+    const migrations: Migration[] = [
+      {
+        id: '0-to-1',
+        up: (config: Record<string, unknown>): Record<string, unknown> => {
+          callOrder.push('0-to-1');
+          return {
+            ...config,
+            enabled: true,
+          };
+        },
+        down: (config: Record<string, unknown>): Record<string, unknown> => ({
+          feature: config.feature,
+        }),
+      },
+      {
+        id: '1-to-2',
+        up: (config: Record<string, unknown>): Record<string, unknown> => {
+          callOrder.push('1-to-2');
+          return {
+            ...config,
+            mode: 'safe',
+          };
+        },
+        down: (config: Record<string, unknown>): Record<string, unknown> => ({
+          feature: config.feature,
+          enabled: config.enabled,
+        }),
+      },
+    ];
+
+    const service = await createConfigService<Record<string, unknown>>(appName, {
+      migrations,
+    });
+
+    expect(callOrder).toEqual(['0-to-1', '1-to-2']);
+    expect(service.config).toEqual({
+      feature: 'legacy',
+      enabled: true,
+      mode: 'safe',
+    });
+  });
+
+  it('persists final migration version using the default version key', async () => {
+    const appName = `version-default-key-${randomUUID()}`;
+    const projectFilePath = path.join(PROJECT_ROOT, '.pi', `${appName}.config.json`);
+
+    writeJsonFile(projectFilePath, {
+      feature: 'legacy',
+    });
+    createdFilePaths.push(projectFilePath);
+
+    const migrations: Migration[] = [
+      {
+        id: '0-to-1',
+        up: (config: Record<string, unknown>): Record<string, unknown> => ({
+          ...config,
+          enabled: true,
+        }),
+        down: (config: Record<string, unknown>): Record<string, unknown> => ({
+          feature: config.feature,
+        }),
+      },
+    ];
+
+    const service = await createConfigService<Record<string, unknown>>(appName, {
+      migrations,
+    });
+
+    await service.save('project');
+
+    const persisted = JSON.parse(fs.readFileSync(projectFilePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+
+    expect(persisted).toMatchObject({
+      feature: 'legacy',
+      enabled: true,
+      __configVersion: 1,
+    });
+  });
+
+  it('hides version metadata by default and exposes it when requested', async () => {
+    const appName = `version-exposure-${randomUUID()}`;
+    const projectFilePath = path.join(PROJECT_ROOT, '.pi', `${appName}.config.json`);
+
+    writeJsonFile(projectFilePath, {
+      feature: 'legacy',
+    });
+    createdFilePaths.push(projectFilePath);
+
+    const migrations: Migration[] = [
+      {
+        id: '0-to-1',
+        up: (config: Record<string, unknown>): Record<string, unknown> => ({
+          ...config,
+          enabled: true,
+        }),
+        down: (config: Record<string, unknown>): Record<string, unknown> => ({
+          feature: config.feature,
+        }),
+      },
+    ];
+
+    const hidden = await createConfigService<Record<string, unknown>>(appName, {
+      migrations,
+      versionKey: 'schemaVersion',
+    });
+
+    expect(hidden.config).not.toHaveProperty('schemaVersion');
+
+    const exposed = await createConfigService<Record<string, unknown>>(appName, {
+      migrations,
+      versionKey: 'schemaVersion',
+      exposeVersion: true,
+    });
+
+    expect(exposed.config).toHaveProperty('schemaVersion', 1);
+  });
+
+  it('applies load flow as raw -> migrate -> merge defaults -> parse', async () => {
+    const appName = `load-flow-${randomUUID()}`;
+    const projectFilePath = path.join(PROJECT_ROOT, '.pi', `${appName}.config.json`);
+    const steps: string[] = [];
+    let parseInput: Record<string, unknown> | null = null;
+
+    writeJsonFile(projectFilePath, {
+      feature: 'legacy',
+    });
+    createdFilePaths.push(projectFilePath);
+
+    const migrations: Migration[] = [
+      {
+        id: '0-to-1',
+        up: (config: Record<string, unknown>): Record<string, unknown> => {
+          steps.push('migrate');
+          expect(config.defaultOnly).toBeUndefined();
+          return {
+            ...config,
+            migratedOnly: 'migrated',
+          };
+        },
+        down: (config: Record<string, unknown>): Record<string, unknown> => ({
+          feature: config.feature,
+        }),
+      },
+    ];
+
+    const service = await createConfigService<Record<string, unknown>>(appName, {
+      defaults: {
+        defaultOnly: 'default',
+      },
+      migrations,
+      parse: (config: unknown): Record<string, unknown> => {
+        steps.push('parse');
+        parseInput = config as Record<string, unknown>;
+        return parseInput;
+      },
+    });
+
+    expect(steps).toEqual(['migrate', 'parse']);
+    expect(parseInput).toMatchObject({
+      feature: 'legacy',
+      migratedOnly: 'migrated',
+      defaultOnly: 'default',
+    });
+    expect(service.config).toMatchObject({
+      feature: 'legacy',
+      migratedOnly: 'migrated',
+      defaultOnly: 'default',
+    });
   });
 });
