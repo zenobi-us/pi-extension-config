@@ -80,6 +80,17 @@ While version is `0.x.x`, breaking changes bump **minor** version.
 - `docs: improve README`
 - `chore: update dependencies`
 
+### Migration Contract Release Checklist
+
+When releasing migration-related changes, verify docs and runtime behavior stay aligned:
+
+1. README documents migration model as `Migration<From,To>[]`, index ordering, baseline `0`.
+2. README documents `versionKey` + `exposeVersion` semantics (default `__configVersion`, hidden by default unless exposed).
+3. Startup helper behavior is unchanged (`runUpMigrationsOnSessionStart` = latest-only + fail-fast).
+4. Preview behavior is documented (`registerMigrationPreviewFlag`, immediate exit, `previewExitMode` semantics).
+5. Result/reporting docs match runtime (`getMigrationResultJson` payload + `notifyMigrationResult` summary behavior).
+6. Run full test suite before merge: `mise run test`.
+
 ## Advanced Release Features
 
 ### Force a Specific Version

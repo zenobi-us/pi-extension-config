@@ -78,6 +78,50 @@ Creates a configuration service instance.
 | `save(target?)` | Persist changes to disk |
 | `reload()` | Reload configuration from all sources |
 
+## Migration Guidance (Task 4 Contract)
+
+### Migration model
+
+- Migration chains are modeled as `Migration<From, To>[]`.
+- Version numbers are positional: array index `0` is migration `0 -> 1`, index `1` is `1 -> 2`, etc.
+- Baseline version is always `0`.
+- Missing persisted version must be treated as `0` before planning/running migrations.
+
+### `versionKey` and `exposeVersion` semantics
+
+For migration-enabled factory wiring, maintainers should follow this contract:
+
+- `versionKey` controls where version metadata is stored in persisted config.
+- Default version key is `__configVersion`.
+- Version metadata is persisted to disk so future runs know the starting version.
+- `exposeVersion` defaults to `false` (version metadata hidden from normal config reads).
+- `exposeVersion: true` allows version metadata to be surfaced intentionally.
+
+### Startup helper and preview behavior
+
+Migration helper APIs are exported from `src/migrations.ts`:
+
+- `runUpMigrationsOnSessionStart(executor)` runs latest-only and fails fast on migration failure.
+- `registerMigrationPreviewFlag(...)` supports CLI preview mode (default flag `--preview-migrations`):
+  - prints migration plan with pending/applied step status
+  - exits immediately after preview output
+  - supports `previewExitMode`:
+    - `'always-zero'` (default): always exits `0`
+    - `'pending-nonzero'`: exits `1` when `pendingCount > 0`, else `0`
+
+### Detailed JSON result + notify behavior
+
+- `getMigrationResultJson(result)` returns a clone-safe detailed payload including:
+  - `status`, `direction`, `initialVersion`, `targetVersion`, `finalVersion`
+  - timing (`startedAt`, `finishedAt`, `durationMs`)
+  - counts (`appliedCount`, `pendingCount`, `failedCount`)
+  - `warnings`, per-step `steps[]`, and optional `failure` context
+- `notifyMigrationResult(result, pitui)` emits a concise human summary via `pitui.notify(...)`:
+  - failed: includes migration id, version transition, and error
+  - migrated: includes applied step count and version transition
+  - preview: includes pending step count and planned transition
+  - noop: indicates already up to date
+
 ## Development
 
 ```bash
