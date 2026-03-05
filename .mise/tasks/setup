@@ -5,8 +5,14 @@ echo ""
 echo "🍜 Setting up project"
 echo ""
 
+is_git_worktree=false
+if git worktree list | grep -q "$(pwd)"; then
+	is_git_worktree=true
+fi
+
 # Only run hk install if not in a git worktree
-if ! git worktree list | grep -q "$(pwd)"; then
+if [ -f .husky/pre-commit ] && [ "$is_git_worktree" = false ]; then
+	echo "🔧 Installing Husky git hooks"
 	hk install
 fi
 
