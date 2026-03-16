@@ -21,16 +21,35 @@ Type-safe, layered configuration for Pi extensions.
 ```typescript
 import { createConfigService } from '@zenobius/pi-extension-config';
 
-
-export default function MyExtension(pi: ExtensionApi) {
+export default async function MyExtension(pi: ExtensionApi) {
   // Create a typed config service
   const service = await createConfigService<MyConfig>('my-extension', {
     defaults: { timeout: 30, verbose: false },
     parse: (raw) => mySchema.parse(raw), // optional validation
   });
 
-  // Read config
-  console.log(service.config.timeout); // 30
+  // Subscribe before first hydration so startup events are observable
+  service.events.on('ConfigLoading', () => {
+    // optional: show spinner/telemetry
+  });
+
+  service.events.on('ConfigLoaded', ({ config }) => {
+    // optional: react to first hydrated config
+    console.log(config.timeout);
+  });
+
+  service.events.on('MigrationApplied', (result) => {
+    console.log(
+      `MyExtensionConfig migrated from v${result.initialVersion} to v${result.finalVersion}`
+    );
+  });
+
+
+  // Wait for initial disk/env/defaults/migration load to complete
+  await service.ready;
+
+  // Read hydrated config
+  console.log(service.config.timeout);
 
   // Update and persist
   await service.set('timeout', 60, 'project');
@@ -40,6 +59,16 @@ export default function MyExtension(pi: ExtensionApi) {
   await service.reload();
 }
 ```
+
+## Initialization and readiness
+
+`createConfigService()` returns the service before first load is hydrated.
+
+- Subscribe to `service.events` immediately after creation.
+- Await `service.ready` before relying on `service.config` values from disk/env/migrations.
+- `set`, `save`, and `reload` are internally gated on readiness.
+
+This design allows consumers to observe startup events (`ConfigLoading`, `ConfigLoaded`, etc.) that happen during first hydration.
 
 ## Installation
 
@@ -68,15 +97,48 @@ Creates a configuration service instance.
 | `name` | `string` | Extension name (used for file paths and env prefix) |
 | `options.defaults` | `Partial<TConfig>` | Default values |
 | `options.parse` | `(raw: unknown) => TConfig \| Promise<TConfig>` | Optional parser/validator |
+| `options.migrations` | `Migration[]` | Optional migration chain (`0->1`, `1->2`, etc.) |
+| `options.versionKey` | `string` | Persisted migration version key (default: `__configVersion`) |
+| `options.exposeVersion` | `boolean` | Expose version key in returned `config` (default: `false`) |
 
 ### `ConfigService<TConfig>`
 
 | Property/Method | Description |
 |-----------------|-------------|
-| `config` | Current configuration object (readonly) |
+| `config` | Current configuration object (readonly clone) |
+| `ready` | Promise that resolves when first hydration finishes |
+| `events` | Typed event emitter for config/migration lifecycle |
 | `set(key, value, target?)` | Set a key (`target`: `'home'` or `'project'`) |
 | `save(target?)` | Persist changes to disk |
 | `reload()` | Reload configuration from all sources |
+
+### `ConfigEventEmitter` events
+
+| Event | Payload |
+|-------|---------|
+| `ConfigLoading` | none |
+| `ConfigLoaded` | `{ config, persistedConfig }` |
+| `ConfigLoadFailed` | `error` |
+| `ConfigParseFailed` | `error` |
+| `ConfigSet` | `{ key, target, previousValue, nextValue }` |
+| `ConfigReloading` | none |
+| `ConfigReloaded` | `{ config, persistedConfig }` |
+| `ConfigReloadFailed` | `error` |
+| `ConfigSaving` | `{ target }` |
+| `ConfigSaved` | `{ target, persistedKeys }` |
+| `ConfigSaveFailed` | `{ target, error }` |
+| `MigrationApplied` | `MigrationResult` |
+| `MigrationNoop` | `MigrationResult` |
+| `MigrationFailed` | `MigrationResult` |
+
+## Upgrade note
+
+If you used older versions that hydrated config during `createConfigService()`, update your flow to:
+
+1. create service
+2. subscribe to events
+3. `await service.ready`
+4. read `service.config`
 
 ## Migration Guidance (Task 4 Contract)
 
