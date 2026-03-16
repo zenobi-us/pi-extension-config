@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/zenobi-us/pi-extension-config/compare/v0.1.0...v0.2.0) (2026-03-16)
+
+
+### Features
+
+* **config:** add event lifecycle and deferred startup loading ([48cb999](https://github.com/zenobi-us/pi-extension-config/commit/48cb99982a40fa971bbb02a80c5ab0db70a9e025))
+
 ## [0.1.0](https://github.com/zenobi-us/pi-extension-config/compare/v0.0.2...v0.1.0) (2026-03-05)
 
 
